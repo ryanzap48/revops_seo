@@ -341,9 +341,6 @@ table.grid td.strong { color: var(--ink); }
 .kw-bar { display: block; height: 2px; background: var(--green); min-width: 2px; margin-top: 6px; }
 .kw-flags { display: flex; gap: 4px; flex-wrap: wrap; }
 
-.site-foot { margin-top: 56px; padding-top: 22px; border-top: 1px solid var(--line); }
-.site-foot p { font-size: 13px; line-height: 1.7; color: var(--ink-faint); max-width: 78ch; }
-
 @media (max-width: 860px) {
   .hero { grid-template-columns: 1fr; gap: 32px; }
   .meter { grid-template-columns: 1fr 54px; gap: 12px; }
