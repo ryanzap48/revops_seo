@@ -51,6 +51,10 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* The browser's own [hidden] rule is a user-agent style, so any `display` set
+   here would silently beat it and leave "hidden" elements on screen. */
+[hidden] { display: none !important; }
+
 body {
   background: var(--paper);
   color: var(--ink);
@@ -96,8 +100,33 @@ a:hover { color: var(--green-hi); text-decoration: underline; }
 
 /* ---------- Search ---------- */
 .search-card { margin-bottom: 40px; }
-.search-label { font-size: 10.5px; color: var(--ink-2); margin-bottom: 12px; display: block; }
+.search-top { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; flex-wrap: wrap; }
+.search-label { font-size: 10.5px; color: var(--ink-2); display: block; }
 .search-row { display: flex; gap: 12px; align-items: stretch; }
+
+.mode-switch { display: flex; border: 1px solid var(--line); border-radius: 100px; padding: 2px; }
+.mode-btn {
+  background: none; border: none; border-radius: 100px; cursor: pointer;
+  font-family: var(--display); font-size: 11px; font-weight: 500; text-transform: uppercase;
+  letter-spacing: 0.1em; color: var(--ink-faint); padding: 6px 15px; transition: background .15s, color .15s;
+}
+.mode-btn:hover { color: var(--ink-2); }
+.mode-btn.is-active { background: var(--green); color: #fff; }
+
+.pages-field { display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 2px; padding: 0 14px; }
+.pages-field span {
+  font-family: var(--display); font-size: 9.5px; text-transform: uppercase;
+  letter-spacing: 0.12em; color: var(--ink-faint);
+}
+.pages-field select {
+  border: none; background: none; outline: none; cursor: pointer;
+  font-family: var(--mono); font-size: 14px; color: var(--ink); padding: 12px 0;
+}
+
+/* Determinate progress while crawling; indeterminate for a single page. */
+.loading .bar.is-determinate i { animation: none; margin-left: 0; transition: width .4s ease; }
+
+.back-strip { margin-bottom: 20px; }
 input[type="text"] {
   flex: 1; min-width: 0; background: var(--paper); border: 1px solid var(--line);
   border-radius: 2px; color: var(--ink); font-family: var(--mono); font-size: 15px;
@@ -183,8 +212,13 @@ button.ghost:hover { border-color: var(--green); color: var(--green-ink); }
 .meter.is-unmeasured .meter-score { color: var(--ink-faint); font-size: 12px; }
 
 /* ---------- Fact sheet ---------- */
-.factsheet { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 1px; background: var(--line-soft); }
-.factsheet > div { background: var(--paper); padding: 14px 22px; min-width: 0; }
+/* Cell borders rather than a 1px grid gap: a partly filled last row then leaves
+   white space instead of a block of the container's background colour. */
+.factsheet { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
+.factsheet > div {
+  padding: 14px 22px; min-width: 0;
+  border-top: 1px solid var(--line-soft); border-right: 1px solid var(--line-soft);
+}
 .factsheet dt { font-size: 9.5px; color: var(--ink-faint); margin-bottom: 4px; }
 .factsheet dd { font-size: 15px; overflow-wrap: anywhere; }
 .factsheet dd.mono { font-family: var(--mono); font-size: 13px; }
@@ -334,6 +368,60 @@ table.grid td.strong { color: var(--ink); }
 }
 .issue-row .note { font-size: 12.5px; color: var(--ink-faint); margin-left: 10px; }
 .issue-row .excerpt { font-family: var(--mono); font-size: 12.5px; color: var(--ink); margin-top: 7px; }
+
+/* ---------- Core Web Vitals ---------- */
+.vitals-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(215px, 1fr)); }
+.vital { padding: 18px 22px; border-top: 1px solid var(--line-soft); border-right: 1px solid var(--line-soft); min-width: 0; }
+.vital-label {
+  font-family: var(--display); font-size: 9.5px; text-transform: uppercase;
+  letter-spacing: 0.12em; color: var(--ink-faint); display: flex; align-items: baseline; gap: 8px;
+}
+.vital-label .abbr { color: var(--ink-2); font-weight: 600; }
+.vital-value { font-family: var(--display); font-size: 27px; font-weight: 500; letter-spacing: -0.02em; margin: 7px 0 3px; }
+.vital-target { font-size: 12.5px; color: var(--ink-faint); }
+.vital-bar { display: flex; height: 5px; margin-top: 13px; background: var(--line-soft); overflow: hidden; }
+.vital-bar i { display: block; height: 100%; }
+.vital-bar i.good { background: var(--green); }
+.vital-bar i.ni { background: var(--amber); }
+.vital-bar i.poor { background: var(--red); }
+.vital-split { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--ink-faint); margin-top: 7px; font-variant-numeric: tabular-nums; }
+.vital-split b { font-weight: 400; }
+.vitals-verdict { padding: 15px 22px; font-size: 14.5px; border-top: 1px solid var(--line-soft); }
+.vitals-verdict.pass { color: var(--green-ink); background: var(--green-soft); }
+.vitals-verdict.fail { color: var(--amber-ink); background: var(--amber-soft); }
+.vitals-unavailable { padding: 22px; font-size: 14.5px; color: var(--ink-dim); max-width: 78ch; }
+.vitals-unavailable code {
+  font-family: var(--mono); font-size: 13px; background: var(--paper-3);
+  padding: 1px 6px; border-radius: 2px; color: var(--ink);
+}
+
+/* ---------- Site report ---------- */
+.dup-group { padding: 14px 22px; border-bottom: 1px solid var(--line-soft); }
+.dup-group:last-child { border-bottom: none; }
+.dup-value { font-size: 14.5px; color: var(--ink); overflow-wrap: anywhere; }
+.dup-value .n {
+  font-family: var(--display); font-size: 9.5px; font-weight: 500; text-transform: uppercase;
+  letter-spacing: 0.1em; color: var(--red-ink); background: var(--red-soft);
+  padding: 2px 8px; border-radius: 2px; margin-right: 10px;
+}
+.dup-urls { list-style: none; margin-top: 8px; }
+.dup-urls li { font-family: var(--mono); font-size: 12.5px; color: var(--ink-dim); padding: 2px 0; overflow-wrap: anywhere; }
+
+.score-cell { display: flex; align-items: center; gap: 9px; justify-content: flex-end; }
+.score-cell .bar { width: 42px; height: 3px; background: var(--line-soft); flex-shrink: 0; }
+.score-cell .bar i { display: block; height: 100%; }
+.score-cell b { font-family: var(--display); font-size: 14px; font-weight: 500; min-width: 34px; text-align: right; }
+
+.page-link { background: none; border: none; padding: 0; cursor: pointer; text-align: left;
+  font-family: var(--mono); font-size: 12.5px; color: var(--green-ink); overflow-wrap: anywhere; }
+.page-link:hover { text-decoration: underline; }
+.page-title-cell { display: block; font-family: var(--body); font-size: 13.5px; color: var(--ink-dim); margin-top: 3px; }
+
+.site-todo-count {
+  font-family: var(--display); font-size: 9.5px; font-weight: 500; text-transform: uppercase;
+  letter-spacing: 0.1em; color: var(--ink-2); background: var(--paper-3);
+  padding: 2px 8px; border-radius: 2px; margin-right: 10px; white-space: nowrap;
+}
 
 /* ---------- Keywords ---------- */
 .kw-legend { padding: 16px 22px; border-bottom: 1px solid var(--line-soft); }

@@ -11,13 +11,53 @@ import { extract } from './lib/extract.js';
 import { createAudit, verdict } from './lib/checks.js';
 import { extractKeywords, tokenize, STOP_WORDS } from './lib/text.js';
 import { titlePixels, descriptionPixels, TITLE_MAX_PX, DESC_MAX_PX } from './lib/pixels.js';
+import { robotsDisallows } from './lib/robots.js';
+import { fetchFieldData, fetchPageFieldData, cruxConfigured, THRESHOLDS } from './lib/vitals.js';
 
 const KB = 1024;
 const TRACKING_PARAM = /^(utm_|gclid|fbclid|msclkid|mc_cid|mc_eid|_ga)/i;
 const SESSION_PARAM = /^(sid|sessionid|session_id|phpsessid|jsessionid|aspsessionid|zenid)$/i;
 const GENERIC_IMAGE_NAME = /\/(img|image|photo|pic|dsc|dcim|screen ?shot|screenshot|untitled|final|copy|asset|download)[-_ ]?\d*\.(jpe?g|png|webp|gif|avif)$/i;
 
-export async function analyze(inputUrl) {
+/**
+ * Fetch everything that describes the *site* rather than one page: robots.txt,
+ * the sitemap, the TLS/ALPN handshake, DNS, and the www/HTTPS canonicalisation
+ * probes. A crawl does this once and hands the result to every page audit,
+ * which is the difference between ~8 requests per page and ~2.
+ */
+export async function buildSiteContext(originUrl) {
+  const origin = new URL(originUrl);
+  const isHttps = origin.protocol === 'https:';
+
+  const [robots, transport, host] = await Promise.all([
+    fetchRobots(origin.origin),
+    isHttps ? negotiatedProtocol(origin.hostname) : Promise.resolve({ protocol: 'HTTP/1.1', alpn: null, tlsVersion: null }),
+    resolveHost(origin.hostname),
+  ]);
+
+  const [sitemap, hostVariant, httpsRedirect, originVitals] = await Promise.all([
+    fetchSitemap(robots.sitemaps?.[0] || `${origin.origin}/sitemap.xml`),
+    checkHostVariant(origin),
+    isHttps ? checkHttpUpgrade(origin) : Promise.resolve({ tested: false }),
+    // Origin-level field data is the fallback for every page that is itself too
+    // low-traffic to appear in CrUX, so a crawl fetches it once.
+    cruxConfigured() ? fetchFieldData({ origin: origin.origin }) : Promise.resolve({ available: false, reason: 'no-key' }),
+  ]);
+
+  return {
+    origin: origin.origin,
+    robots, transport, host, sitemap, hostVariant, httpsRedirect, originVitals,
+    faviconCache: new Map(),
+  };
+}
+
+/**
+ * Audit one page.
+ * @param {string} inputUrl
+ * @param {{site?: object}} [options] `site` reuses a context from
+ *        buildSiteContext(); it is ignored if it belongs to a different origin.
+ */
+export async function analyze(inputUrl, options = {}) {
   const requested = normalizeUrl(inputUrl);
 
   const page = await fetchPage(requested.href);
@@ -25,18 +65,14 @@ export async function analyze(inputUrl) {
   const html = decodeBody(page.body, page.headers);
   const doc = extract(html, finalUrl.href, page.headers);
 
-  // Everything else is independent of the HTML, so fetch it concurrently.
-  const [robots, transport, host] = await Promise.all([
-    fetchRobots(finalUrl.origin),
-    finalUrl.protocol === 'https:' ? negotiatedProtocol(finalUrl.hostname) : Promise.resolve({ protocol: 'HTTP/1.1', alpn: null, tlsVersion: null }),
-    resolveHost(finalUrl.hostname),
-  ]);
+  const site = options.site?.origin === finalUrl.origin ? options.site : await buildSiteContext(finalUrl);
+  const { robots, transport, host, sitemap, hostVariant, httpsRedirect } = site;
 
-  const [sitemap, faviconCheck, hostVariant, httpsRedirect] = await Promise.all([
-    fetchSitemap(robots.sitemaps?.[0] || `${finalUrl.origin}/sitemap.xml`),
-    checkFavicon(doc, finalUrl),
-    checkHostVariant(finalUrl),
-    finalUrl.protocol === 'https:' ? checkHttpUpgrade(finalUrl) : Promise.resolve({ tested: false }),
+  const [faviconCheck, vitals] = await Promise.all([
+    checkFavicon(doc, finalUrl, site.faviconCache),
+    options.skipVitals
+      ? Promise.resolve({ available: false, reason: 'skipped' })
+      : fetchPageFieldData(finalUrl.href, site.originVitals),
   ]);
 
   const htmlBytes = page.body.length;
@@ -47,6 +83,7 @@ export async function analyze(inputUrl) {
   runStructureChecks(audit, { doc });
   runLinkChecks(audit, { doc });
   runServerChecks(audit, { doc, page, finalUrl, htmlBytes, robots, sitemap, transport, hostVariant, httpsRedirect });
+  runVitalsChecks(audit, { vitals });
   runExternalChecks(audit, { doc });
 
   const scored = audit.finalize();
@@ -106,6 +143,7 @@ export async function analyze(inputUrl) {
       canonical: doc.canonical,
     },
 
+    vitals,
     categories: scored.categories,
     todos: scored.todos,
     elements: buildElements({ doc, page, transport, keywords, keywordScope }),
@@ -864,6 +902,79 @@ function runServerChecks(audit, { doc, page, finalUrl, htmlBytes, robots, sitema
 }
 
 // ---------------------------------------------------------------------------
+// Core Web Vitals (Chrome UX Report field data)
+// ---------------------------------------------------------------------------
+
+const VITALS_ADVICE = {
+  lcp: 'Speed up the largest element: serve the hero image in a modern format at the right size, preload it, drop render-blocking CSS/JS, and cut server response time.',
+  inp: 'Reduce main-thread work so the page answers input quickly: break up long tasks, defer third-party scripts, and shrink hydration work.',
+  cls: 'Reserve space for anything that loads late: set width and height on images and embeds, and never insert banners above existing content.',
+  fcp: 'Get the first paint out sooner: inline critical CSS, defer everything non-essential, and preconnect to required origins.',
+  ttfb: 'Cut server response time with caching, a CDN, and less work per request.',
+};
+
+function runVitalsChecks(audit, { vitals }) {
+  // Nothing here is inferable from the HTML — it is measured on real visitors'
+  // devices. Without data the category is reported and excluded, never estimated.
+  if (!vitals.available) {
+    const summary = audit.check('vitals', 'Field data', 'critical', {
+      help: 'Core Web Vitals come from real Chrome users, so they have to be fetched rather than inspected.',
+    });
+    summary.info(vitals.message || 'No Core Web Vitals field data is available.');
+    if (vitals.reason === 'no-key') {
+      summary.info('Set CRUX_API_KEY to score this category. The Chrome UX Report API is free; PageSpeed Insights is not a keyless alternative, since its anonymous quota is shared and routinely exhausted.');
+    } else if (vitals.reason === 'no-data') {
+      summary.info('CrUX only reports on addresses with enough real traffic. Lower-traffic pages have no field data at all — this says nothing about how fast the page is.');
+    }
+    audit.unmeasured('vitals', vitals.message || 'Core Web Vitals field data is unavailable, so this category is reported but excluded from the score.');
+    return;
+  }
+
+  const scopeNote = vitals.scope === 'origin'
+    ? `Measured across the whole origin${vitals.fellBackFromUrl ? ' — this URL alone has too little traffic for its own record' : ''}.`
+    : 'Measured for this exact URL.';
+
+  for (const key of ['lcp', 'inp', 'cls', 'fcp', 'ttfb']) {
+    const metric = vitals.metrics[key];
+    if (!metric) continue;
+
+    const t = THRESHOLDS[key];
+    const check = audit.check('vitals', metric.label, t.core ? 'critical' : 'low', {
+      value: `${metric.display} at the 75th percentile`,
+      help: key === 'lcp' ? scopeNote : null,
+    });
+
+    const goodText = t.unit === 'ms' ? `${t.good} ms` : t.good;
+    const poorText = t.unit === 'ms' ? `${t.poor} ms` : t.poor;
+
+    if (metric.rating === 'good') {
+      check.ok(`${metric.display} is within the "good" threshold of ${goodText}.`);
+    } else if (metric.rating === 'needs-improvement') {
+      check.warn(`${metric.display} needs improvement — "good" is ${goodText} or less.`, { todo: VITALS_ADVICE[key] });
+    } else {
+      check.fail(`${metric.display} is poor — above the ${poorText} failure threshold.`, { todo: VITALS_ADVICE[key] });
+    }
+
+    // Informational, not scored: a p75 inside the threshold already implies at
+    // least 75% good visits, so scoring the split would penalise the same fault
+    // twice and repeat the same fix in the to-do list. It is still worth showing —
+    // the p75 hides how bad the slow tail is for real people.
+    check.info(`${metric.good}% of visits good · ${metric.needsImprovement}% need improvement · ${metric.poor}% poor.`);
+  }
+
+  const overall = audit.check('vitals', 'Core Web Vitals assessment', 'high', {
+    help: 'Google treats the assessment as passed only when LCP, INP and CLS are all good.',
+  });
+  overall.assert(
+    vitals.passes,
+    'This page passes the Core Web Vitals assessment.',
+    'This page does not pass the Core Web Vitals assessment — all three of LCP, INP and CLS must be good.',
+    { todo: 'Bring every failing Core Web Vital into the good range; a single failing metric fails the whole assessment.' }
+  );
+  overall.info(`${scopeNote}${vitals.collectionPeriod ? ` Collection period ${vitals.collectionPeriod.from} to ${vitals.collectionPeriod.to}.` : ''} Form factor: ${vitals.formFactor}.`);
+}
+
+// ---------------------------------------------------------------------------
 // External factors
 // ---------------------------------------------------------------------------
 
@@ -942,17 +1053,23 @@ function buildElements({ doc, page, transport, keywords, keywordScope }) {
 // Supporting probes & utilities
 // ---------------------------------------------------------------------------
 
-async function checkFavicon(doc, finalUrl) {
+async function checkFavicon(doc, finalUrl, cache) {
   const declared = doc.favicons.find((f) => f.href);
   const target = declared ? new URL(declared.href, finalUrl).href : `${finalUrl.origin}/favicon.ico`;
+
+  // Across a crawl every page usually declares the same icon — probe it once.
+  if (cache?.has(target)) return { ...cache.get(target), declared: Boolean(declared) };
+
   const res = await probe(target);
   const type = String(res.headers?.['content-type'] || '');
-  return {
+  const result = {
     declared: Boolean(declared),
     url: target,
     ok: res.ok && !/text\/html/i.test(type),
     status: res.status,
   };
+  cache?.set(target, result);
+  return result;
 }
 
 // Do www and non-www resolve to the same canonical hostname?
@@ -992,53 +1109,7 @@ async function checkHttpUpgrade(finalUrl) {
   }
 }
 
-// Minimal robots.txt matcher for the `*` user-agent group. Returns the matching
-// Disallow pattern, or false when the path is crawlable.
-function robotsDisallows(text, pathWithQuery) {
-  const lines = String(text).split(/\r?\n/);
-  let inGroup = false;
-  const rules = [];
-
-  for (const raw of lines) {
-    const line = raw.replace(/#.*$/, '').trim();
-    if (!line) continue;
-    const [rawKey, ...rest] = line.split(':');
-    const key = rawKey.trim().toLowerCase();
-    const value = rest.join(':').trim();
-
-    if (key === 'user-agent') {
-      inGroup = value === '*' || /googlebot/i.test(value);
-      continue;
-    }
-    if (!inGroup) continue;
-    if (key === 'disallow' || key === 'allow') rules.push({ type: key, value });
-  }
-
-  let best = null;
-  for (const rule of rules) {
-    if (rule.type === 'disallow' && rule.value === '') continue;
-    if (!robotsPathMatch(rule.value, pathWithQuery)) continue;
-    const specificity = rule.value.replace(/\*/g, '').length;
-    if (!best || specificity > best.specificity || (specificity === best.specificity && rule.type === 'allow')) {
-      best = { ...rule, specificity };
-    }
-  }
-
-  return best && best.type === 'disallow' ? best.value : false;
-}
-
-function robotsPathMatch(pattern, path) {
-  if (!pattern) return false;
-  const anchored = pattern.endsWith('$');
-  const body = anchored ? pattern.slice(0, -1) : pattern;
-  const source = body
-    .split('*')
-    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-    .join('.*');
-  return new RegExp(`^${source}${anchored ? '$' : ''}`).test(path);
-}
-
-function normalizeUrl(input) {
+export function normalizeUrl(input) {
   const raw = String(input || '').trim();
   if (!raw) throw new Error('Please provide a URL to analyze.');
   let url;

@@ -3,16 +3,27 @@
 const $ = (sel) => document.querySelector(sel);
 const el = {
   input: $('#url'), run: $('#run'), error: $('#error'), loading: $('#loading'),
-  loadingText: $('#loading-text'), results: $('#results'),
+  loadingText: $('#loading-text'), loadingBar: $('#loading-bar'), results: $('#results'),
   gauge: $('#gauge-fill'), scoreNum: $('#score-num'), scoreVerdict: $('#score-verdict'),
   errors: $('#count-errors'), warnings: $('#count-warnings'), passed: $('#count-passed'),
   meters: $('#hero-meters'), factsheet: $('#factsheet'), analyzedAt: $('#analyzed-at'),
   todos: $('#todos'), todoPanel: $('#todo-panel'), checks: $('#checks'),
   elements: $('#elements'), keywords: $('#keywords'), tabs: $('#tabs'), export: $('#export'),
+
+  modeSwitch: $('#mode-switch'), urlLabel: $('#url-label'), pagesField: $('#pages-field'), maxPages: $('#max-pages'),
+  backStrip: $('#back-strip'), backToSite: $('#back-to-site'),
+  siteResults: $('#site-results'), siteGauge: $('#site-gauge-fill'),
+  siteScoreNum: $('#site-score-num'), siteScoreVerdict: $('#site-score-verdict'),
+  siteStrong: $('#site-count-strong'), siteFair: $('#site-count-fair'), siteWeak: $('#site-count-weak'),
+  siteMeters: $('#site-meters'), siteFactsheet: $('#site-factsheet'), siteCrawledAt: $('#site-crawled-at'),
+  siteTabs: $('#site-tabs'), siteTodos: $('#site-todos'), siteIssues: $('#site-issues'),
+  sitePages: $('#site-pages'), siteExport: $('#site-export'),
 };
 
 const GAUGE_CIRCUMFERENCE = 2 * Math.PI * 68;
 let lastReport = null;
+let lastSiteReport = null;
+let mode = 'page';
 
 const PROGRESS_STEPS = [
   'Fetching the page, robots.txt, sitemap, host variants and TLS handshake…',
@@ -94,18 +105,31 @@ function table(headers, rows) {
 // Request
 // ---------------------------------------------------------------------------
 
-async function runAudit() {
-  const url = el.input.value.trim();
+function startLoading(indeterminate = true) {
   el.error.hidden = true;
-  if (!url) {
-    el.error.textContent = 'Enter a URL to check.';
-    el.error.hidden = false;
-    return;
-  }
-
   el.run.disabled = true;
   el.loading.hidden = false;
+  el.loadingBar.classList.toggle('is-determinate', !indeterminate);
+  el.loadingBar.querySelector('i').style.width = indeterminate ? '' : '0%';
+}
+
+function stopLoading() {
+  el.run.disabled = false;
+  el.loading.hidden = true;
+}
+
+function showError(message) {
+  el.error.textContent = message;
+  el.error.hidden = false;
+}
+
+async function runAudit(targetUrl, { keepSiteReport = false } = {}) {
+  const url = (targetUrl ?? el.input.value).trim();
+  if (!url) return showError('Enter a URL to check.');
+
+  startLoading(true);
   el.results.hidden = true;
+  if (!keepSiteReport) el.siteResults.hidden = true;
 
   let step = 0;
   el.loadingText.textContent = PROGRESS_STEPS[0];
@@ -123,24 +147,136 @@ async function runAudit() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'The audit failed.');
     lastReport = data;
+    el.siteResults.hidden = true;
+    el.backStrip.hidden = !keepSiteReport;
     render(data);
   } catch (err) {
-    el.error.textContent = err.message;
-    el.error.hidden = false;
+    showError(err.message);
   } finally {
     clearInterval(ticker);
-    el.run.disabled = false;
-    el.loading.hidden = true;
+    stopLoading();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Site crawl: start a job, poll it, render the aggregate
+// ---------------------------------------------------------------------------
+
+async function runCrawl() {
+  const url = el.input.value.trim();
+  if (!url) return showError('Enter a site to crawl.');
+
+  const maxPages = Number(el.maxPages.value);
+  startLoading(false);
+  el.results.hidden = true;
+  el.siteResults.hidden = true;
+  el.loadingText.textContent = 'Reading robots.txt and the sitemap, then crawling…';
+
+  try {
+    const res = await fetch('/api/crawl', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, maxPages }),
+    });
+    const started = await res.json();
+    if (!res.ok) throw new Error(started.error || 'The crawl could not be started.');
+
+    const result = await pollCrawl(started.jobId);
+    lastSiteReport = result;
+    renderSite(result);
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    stopLoading();
+  }
+}
+
+function pollCrawl(jobId) {
+  return new Promise((resolve, reject) => {
+    let misses = 0;
+
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/crawl/${jobId}`);
+        const job = await res.json();
+        if (!res.ok) throw new Error(job.error || 'Lost track of that crawl.');
+
+        const { crawled = 0, discovered = 0, target = 1 } = job.progress || {};
+        el.loadingBar.querySelector('i').style.width = `${Math.min(100, (crawled / Math.max(1, target)) * 100)}%`;
+        el.loadingText.textContent = `Audited ${crawled} of ${target} pages · ${discovered} URLs discovered`;
+
+        if (job.status === 'done') return resolve(job.result);
+        if (job.status === 'error') return reject(new Error(job.error || 'The crawl failed.'));
+        setTimeout(tick, 800);
+      } catch (err) {
+        // Tolerate a couple of dropped polls before giving up on the job.
+        if (++misses > 3) return reject(err);
+        setTimeout(tick, 1200);
+      }
+    };
+
+    tick();
+  });
 }
 
 // ---------------------------------------------------------------------------
 // Render
 // ---------------------------------------------------------------------------
 
+const VITAL_ABBR = { lcp: 'LCP', inp: 'INP', cls: 'CLS', fcp: 'FCP', ttfb: 'TTFB' };
+const RATING_LABEL = { good: 'Good', 'needs-improvement': 'Needs improvement', poor: 'Poor' };
+const RATING_INK = { good: 'var(--green-ink)', 'needs-improvement': 'var(--amber-ink)', poor: 'var(--red-ink)' };
+
+/** Field-data panel, shared by the page report and the site report. */
+function renderVitalsInto(panel, noteEl, bodyEl, vitals) {
+  if (!vitals) { panel.hidden = true; return; }
+  panel.hidden = false;
+
+  if (!vitals.available) {
+    noteEl.textContent = 'not available';
+    bodyEl.innerHTML = `<div class="vitals-unavailable">
+      <p>${esc(vitals.message || 'No field data available.')}</p>
+      ${vitals.reason === 'no-key'
+        ? `<p style="margin-top:10px">Enable the <em>Chrome UX Report API</em> in Google Cloud, create a key, and set <code>CRUX_API_KEY</code>. Until then this category is reported but left out of the score rather than estimated.</p>`
+        : ''}
+    </div>`;
+    return;
+  }
+
+  const order = ['lcp', 'inp', 'cls', 'fcp', 'ttfb'];
+  const metrics = order.map((k) => vitals.metrics[k]).filter(Boolean);
+
+  noteEl.textContent = [
+    vitals.scope === 'origin' ? 'whole origin' : 'this URL',
+    vitals.formFactor === 'PHONE' ? 'mobile' : String(vitals.formFactor || '').toLowerCase(),
+    vitals.collectionPeriod ? `${vitals.collectionPeriod.from} → ${vitals.collectionPeriod.to}` : null,
+  ].filter(Boolean).join(' · ');
+
+  bodyEl.innerHTML = `
+    <div class="vitals-grid">
+      ${metrics.map((m) => `
+        <div class="vital">
+          <div class="vital-label"><span class="abbr">${VITAL_ABBR[m.key]}</span>${esc(m.label)}</div>
+          <div class="vital-value" style="color:${RATING_INK[m.rating]}">${esc(m.display)}</div>
+          <div class="vital-target">${esc(RATING_LABEL[m.rating])} · good is ${m.threshold.unit === 'ms' ? `${m.threshold.good} ms` : m.threshold.good} or less</div>
+          <div class="vital-bar">
+            <i class="good" style="width:${m.good}%"></i><i class="ni" style="width:${m.needsImprovement}%"></i><i class="poor" style="width:${m.poor}%"></i>
+          </div>
+          <div class="vital-split"><b>${m.good}% good</b><b>${m.needsImprovement}% NI</b><b>${m.poor}% poor</b></div>
+        </div>`).join('')}
+    </div>
+    <div class="vitals-verdict ${vitals.passes ? 'pass' : 'fail'}">
+      ${vitals.passes
+        ? 'Passes the Core Web Vitals assessment — LCP, INP and CLS are all good.'
+        : 'Does not pass the Core Web Vitals assessment. All three of LCP, INP and CLS must be good.'}
+      ${vitals.fellBackFromUrl ? ' This page has too little traffic for its own record, so origin-level data is shown.' : ''}
+    </div>`;
+}
+
 function render(d) {
   renderHero(d);
   renderFactsheet(d);
+  renderVitalsInto($('#vitals-panel'), $('#vitals-note'), $('#vitals-body'), d.vitals);
   renderTodos(d);
   renderChecks(d);
   renderElements(d);
@@ -399,8 +535,235 @@ function renderKeywords(d) {
 }
 
 // ---------------------------------------------------------------------------
+// Site report
+// ---------------------------------------------------------------------------
+
+function renderSite(d) {
+  el.siteScoreNum.textContent = `${d.score.overall}%`;
+  el.siteScoreNum.style.color = scoreInk(d.score.overall);
+  el.siteScoreVerdict.textContent = d.score.verdict;
+  el.siteGauge.style.stroke = scoreColor(d.score.overall);
+  el.siteGauge.style.strokeDasharray = `${(d.score.overall / 100) * GAUGE_CIRCUMFERENCE} ${GAUGE_CIRCUMFERENCE}`;
+
+  el.siteStrong.textContent = d.score.distribution.strong;
+  el.siteFair.textContent = d.score.distribution.fair;
+  el.siteWeak.textContent = d.score.distribution.weak;
+
+  el.siteMeters.innerHTML = d.categories.map((c) => `
+    <div class="meter${c.measured ? '' : ' is-unmeasured'}">
+      <div class="meter-label">${esc(c.label)}<em>${c.measured ? `avg of ${c.pages} pages` : 'not measured'}</em></div>
+      <div class="meter-track"><i style="width:${c.measured ? c.score : 0}%;background:${scoreColor(c.measured ? c.score : null)}"></i></div>
+      <div class="meter-score" style="color:${scoreInk(c.measured ? c.score : null)}">${c.measured ? `${c.score}%` : 'n/a'}</div>
+    </div>`).join('');
+
+  renderSiteFactsheet(d);
+  renderVitalsInto($('#site-vitals-panel'), $('#site-vitals-note'), $('#site-vitals-body'), d.vitals);
+  renderSiteTodos(d);
+  renderSiteIssues(d);
+  renderSitePages(d);
+
+  el.siteCrawledAt.textContent = `Crawled ${new Date(d.startedAt).toLocaleString()}`;
+  el.siteResults.hidden = false;
+  el.backStrip.hidden = true;
+  selectSiteTab('overview');
+  el.siteResults.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function renderSiteFactsheet(d) {
+  const rows = [];
+  const add = (label, value, wide = false) =>
+    rows.push(`<div${wide ? ' class="span-2"' : ''}><dt>${esc(label)}</dt><dd>${value}</dd></div>`);
+
+  add('Site', `<a href="${esc(d.origin)}" target="_blank" rel="noopener noreferrer">${esc(d.origin)}</a>`, true);
+  add('Pages audited', `${d.crawl.crawled}${d.crawl.failed ? ` <span class="tag fail">${d.crawl.failed} failed</span>` : ''}`);
+  add('URLs discovered', String(d.crawl.discovered));
+  add('Not visited', d.crawl.notVisited > 0
+    ? `${d.crawl.notVisited} <span class="mono-note">raise the page limit to go deeper</span>`
+    : '<span class="muted">none — the whole site was covered</span>');
+  add('Crawl time', `${(d.durationMs / 1000).toFixed(1)} sec`);
+  add('Score range', `${d.score.worst}% – ${d.score.best}%`);
+  add('robots.txt', d.crawl.robotsFound ? tag('found', 'ok') : tag('missing', 'warn'));
+  add('Sitemap', d.crawl.sitemapFound ? `${tag('found', 'ok')}<span class="mono-note">${d.crawl.sitemapUrls} URLs</span>` : tag('missing', 'warn'));
+
+  el.siteFactsheet.innerHTML = rows.join('');
+}
+
+function renderSiteTodos(d) {
+  if (!d.todos.length) {
+    el.siteTodos.innerHTML = `<div class="panel"><p class="empty-state"><b>Nothing to fix.</b> Every measurable check passed on all ${d.crawl.crawled} pages.</p></div>`;
+    return;
+  }
+
+  el.siteTodos.innerHTML = `
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Site to-do list</h2>
+        <span class="mono-note">${d.todos.length} tasks across ${d.crawl.crawled} pages</span>
+      </div>
+      ${d.todos.map((t) => `
+        <div class="todo-row">
+          <div class="todo-action">
+            <span class="site-todo-count">${t.pageCount} ${t.pageCount === 1 ? 'page' : 'pages'}</span>${esc(t.action)}
+            <span class="because"><span class="where">${esc(t.category)} › ${esc(t.check)}</span></span>
+          </div>
+          <div><span class="imp imp-${t.importance}">${esc(t.importanceLabel)}</span></div>
+        </div>`).join('')}
+    </div>`;
+}
+
+function renderSiteIssues(d) {
+  const i = d.issues;
+  const origin = d.origin;
+  const short = (u) => esc(shortUrl(u, origin));
+  const out = [];
+
+  const dupSection = (title, groups, note) => details(title, groups.length || 'None', groups.length
+    ? groups.map((g) => `
+        <div class="dup-group">
+          <div class="dup-value"><span class="n">${g.count} pages</span>${esc(truncate(g.value, 160))}</div>
+          <ul class="dup-urls">${g.urls.map((u) => `<li>${short(u)}</li>`).join('')}</ul>
+        </div>`).join('')
+    : `<p class="empty-state">${esc(note)}</p>`, { muted: groups.length === 0, open: groups.length > 0 });
+
+  out.push(dupSection('Duplicate titles', i.duplicateTitles,
+    'Every page has a distinct title. Duplicate titles make search engines pick one page and ignore the others.'));
+  out.push(dupSection('Duplicate meta descriptions', i.duplicateDescriptions,
+    'Every page has a distinct meta description.'));
+  out.push(dupSection('Duplicate H1 headings', i.duplicateH1s,
+    'Every page has a distinct H1.'));
+  out.push(dupSection('Duplicate content', i.duplicateContent,
+    'No two pages share the same body text.'));
+
+  const urlList = (title, urls, note) => details(title, urls.length || 'None', urls.length
+    ? `<ul class="blocklist">${urls.map((u) => `<li>${short(u)}</li>`).join('')}</ul>`
+    : `<p class="empty-state">${esc(note)}</p>`, { muted: urls.length === 0 });
+
+  out.push(urlList('Missing meta description', i.missingDescriptions, 'Every page has a meta description.'));
+  out.push(urlList('Missing H1', i.missingH1s, 'Every page has an H1.'));
+  out.push(urlList('Missing title', i.missingTitles, 'Every page has a title.'));
+  out.push(urlList('Blocked from indexing', i.noindexPages, 'No crawled page carries a noindex directive.'));
+
+  out.push(details('Thin pages', i.thinPages.length || 'None', i.thinPages.length
+    ? table(['URL', { label: 'Words', align: 'right' }], i.thinPages.map((p) => `
+        <tr><td class="mono">${short(p.url)}</td><td class="num">${p.wordCount}</td></tr>`))
+    : '<p class="empty-state">No page is under 300 words.</p>', { muted: i.thinPages.length === 0 }));
+
+  out.push(details('Broken pages', i.brokenPages.length || 'None', i.brokenPages.length
+    ? table(['URL', 'Status', 'Linked from'], i.brokenPages.map((p) => `
+        <tr><td class="mono">${short(p.url)}</td><td>${tag(p.status, 'fail')}</td>
+        <td class="mono">${p.linkedFrom.map(short).join('<br>') || '<span class="muted">—</span>'}</td></tr>`))
+    : '<p class="empty-state">Every crawled URL returned a successful status.</p>', { muted: i.brokenPages.length === 0 }));
+
+  out.push(details('Pages reached via redirect', i.redirectingPages.length || 'None', i.redirectingPages.length
+    ? table(['From', 'To', { label: 'Hops', align: 'right' }], i.redirectingPages.map((p) => `
+        <tr><td class="mono">${short(p.from)}</td><td class="mono">${short(p.to)}</td><td class="num">${p.hops}</td></tr>`))
+    : '<p class="empty-state">No crawled URL needed a redirect.</p>', { muted: i.redirectingPages.length === 0 }));
+
+  out.push(details('Possible orphan pages', i.orphanCandidates.length || 'None', i.orphanCandidates.length
+    ? `<p class="kw-legend"><p>These URLs are in the sitemap but nothing linked to them from the pages crawled. Deepen the crawl to confirm — a page linked only from an uncrawled page will appear here too.</p></p>
+       <ul class="blocklist">${i.orphanCandidates.map((u) => `<li>${short(u)}</li>`).join('')}</ul>`
+    : '<p class="empty-state">Every sitemap URL crawled was linked from somewhere.</p>', { muted: i.orphanCandidates.length === 0 }));
+
+  out.push(details('Deep pages (4+ clicks)', i.deepPages.length || 'None', i.deepPages.length
+    ? table(['URL', { label: 'Depth', align: 'right' }], i.deepPages.map((p) => `
+        <tr><td class="mono">${short(p.url)}</td><td class="num">${p.depth}</td></tr>`))
+    : '<p class="empty-state">No page is more than three clicks from the start URL.</p>', { muted: i.deepPages.length === 0 }));
+
+  out.push(details('Slow pages', i.slowPages.length || 'None', i.slowPages.length
+    ? table(['URL', { label: 'TTFB', align: 'right' }], i.slowPages.map((p) => `
+        <tr><td class="mono">${short(p.url)}</td><td class="num">${(p.responseMs / 1000).toFixed(2)} s</td></tr>`))
+    : '<p class="empty-state">Every page responded in under 0.8 seconds.</p>', { muted: i.slowPages.length === 0 }));
+
+  if (i.unreachable.length) {
+    out.push(details('Could not be audited', i.unreachable.length,
+      table(['URL', 'Reason'], i.unreachable.map((f) => `
+        <tr><td class="mono">${short(f.url)}</td><td>${esc(f.error)}</td></tr>`)), { open: true }));
+  }
+
+  el.siteIssues.innerHTML = out.join('');
+}
+
+function renderSitePages(d) {
+  const rows = [...d.pages].sort((a, b) => a.score - b.score).map((p) => `
+    <tr>
+      <td>
+        <button class="page-link" data-page-url="${esc(p.finalUrl)}">${esc(shortUrl(p.url, d.origin))}</button>
+        <span class="page-title-cell">${p.title ? esc(truncate(p.title, 80)) : '<span class="tag fail">no title</span>'}</span>
+      </td>
+      <td class="num">${p.wordCount}</td>
+      <td class="num">${typeof p.depth === 'number' ? p.depth : '<span class="muted">—</span>'}</td>
+      <td class="num">${p.errors ? `<span style="color:var(--red-ink)">${p.errors}</span>` : '0'} / ${p.warnings}</td>
+      <td>
+        <div class="score-cell">
+          <span class="bar"><i style="width:${p.score}%;background:${scoreColor(p.score)}"></i></span>
+          <b style="color:${scoreInk(p.score)}">${p.score}%</b>
+        </div>
+      </td>
+    </tr>`);
+
+  el.sitePages.innerHTML = `
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Pages</h2>
+        <span class="mono-note">worst first · select a URL for its full report</span>
+      </div>
+      ${table(['URL', { label: 'Words', align: 'right' }, { label: 'Depth', align: 'right' },
+               { label: 'Err / Warn', align: 'right' }, { label: 'Score', align: 'right' }], rows)}
+    </div>`;
+
+  el.sitePages.querySelectorAll('[data-page-url]').forEach((button) => {
+    button.addEventListener('click', () => runAudit(button.dataset.pageUrl, { keepSiteReport: true }));
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Tabs, export, wiring
 // ---------------------------------------------------------------------------
+
+function selectSiteTab(name) {
+  el.siteTabs.querySelectorAll('.tab').forEach((t) => t.classList.toggle('is-active', t.dataset.stab === name));
+  el.siteResults.querySelectorAll('.tab-panel').forEach((p) => p.classList.toggle('is-active', p.dataset.spanel === name));
+}
+
+el.siteTabs.addEventListener('click', (event) => {
+  const button = event.target.closest('.tab');
+  if (button) selectSiteTab(button.dataset.stab);
+});
+
+function setMode(next) {
+  mode = next;
+  el.modeSwitch.querySelectorAll('.mode-btn').forEach((b) => b.classList.toggle('is-active', b.dataset.mode === next));
+  el.pagesField.hidden = next !== 'site';
+  el.urlLabel.textContent = next === 'site' ? 'Site to crawl' : 'Page to check';
+  el.run.textContent = next === 'site' ? 'Crawl site' : 'Check page';
+  el.input.placeholder = next === 'site' ? 'https://example.com' : 'https://example.com/page';
+}
+
+el.modeSwitch.addEventListener('click', (event) => {
+  const button = event.target.closest('.mode-btn');
+  if (button) setMode(button.dataset.mode);
+});
+
+el.backToSite.addEventListener('click', () => {
+  el.results.hidden = true;
+  el.backStrip.hidden = true;
+  el.siteResults.hidden = false;
+  el.siteResults.scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
+
+el.siteExport.addEventListener('click', () => {
+  if (!lastSiteReport) return;
+  downloadJson(lastSiteReport, `site-audit-${new URL(lastSiteReport.origin).hostname}-${lastSiteReport.startedAt.slice(0, 10)}.json`);
+});
+
+function downloadJson(data, filename) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
 
 function selectTab(name) {
   el.tabs.querySelectorAll('.tab').forEach((t) => t.classList.toggle('is-active', t.dataset.tab === name));
@@ -414,20 +777,19 @@ el.tabs.addEventListener('click', (event) => {
 
 el.export.addEventListener('click', () => {
   if (!lastReport) return;
-  const blob = new Blob([JSON.stringify(lastReport, null, 2)], { type: 'application/json' });
-  const link = document.createElement('a');
-  link.href = URL.createObjectURL(blob);
-  link.download = `audit-${new URL(lastReport.page.url).hostname}-${lastReport.analyzedAt.slice(0, 10)}.json`;
-  link.click();
-  URL.revokeObjectURL(link.href);
+  downloadJson(lastReport, `audit-${new URL(lastReport.page.url).hostname}-${lastReport.analyzedAt.slice(0, 10)}.json`);
 });
 
-el.run.addEventListener('click', runAudit);
-el.input.addEventListener('keydown', (event) => { if (event.key === 'Enter') runAudit(); });
+const submit = () => (mode === 'site' ? runCrawl() : runAudit());
+el.run.addEventListener('click', submit);
+el.input.addEventListener('keydown', (event) => { if (event.key === 'Enter') submit(); });
 
-// Allow ?url= to prefill and auto-run, which makes reports linkable.
-const preset = new URLSearchParams(location.search).get('url');
+// ?url= prefills and auto-runs, which makes reports linkable; ?mode=site crawls.
+const params = new URLSearchParams(location.search);
+const preset = params.get('url');
+if (params.get('mode') === 'site') setMode('site');
+if (params.get('pages')) el.maxPages.value = params.get('pages');
 if (preset) {
   el.input.value = preset;
-  runAudit();
+  submit();
 }

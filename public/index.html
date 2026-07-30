@@ -21,19 +21,92 @@
   </header>
 
   <section class="search-card">
-    <label class="search-label" for="url">Page to check</label>
+    <div class="search-top">
+      <label class="search-label" for="url" id="url-label">Page to check</label>
+      <div class="mode-switch" id="mode-switch" role="tablist">
+        <button class="mode-btn is-active" data-mode="page" role="tab">This page</button>
+        <button class="mode-btn" data-mode="site" role="tab">Whole site</button>
+      </div>
+    </div>
     <div class="search-row">
       <input type="text" id="url" placeholder="https://example.com/page" autocomplete="off" spellcheck="false">
+      <label class="pages-field" id="pages-field" hidden>
+        <span>Pages</span>
+        <select id="max-pages">
+          <option value="10">10</option>
+          <option value="25" selected>25</option>
+          <option value="50">50</option>
+        </select>
+      </label>
       <button class="run" id="run">Check page</button>
     </div>
     <p class="error" id="error" hidden></p>
     <div class="loading" id="loading" hidden>
       <span id="loading-text">Fetching the page, robots.txt, sitemap, host variants and TLS handshake…</span>
-      <div class="bar"><i></i></div>
+      <div class="bar" id="loading-bar"><i></i></div>
     </div>
   </section>
 
+  <!-- Site crawl report -->
+  <main id="site-results" hidden>
+    <section class="hero">
+      <div class="hero-gauge">
+        <div class="gauge">
+          <svg viewBox="0 0 160 160" aria-hidden="true">
+            <circle class="gauge-track" cx="80" cy="80" r="68" />
+            <circle class="gauge-fill" id="site-gauge-fill" cx="80" cy="80" r="68" />
+          </svg>
+          <div class="gauge-val">
+            <strong id="site-score-num">–</strong>
+            <span id="site-score-verdict"></span>
+          </div>
+        </div>
+        <div class="gauge-caption">Site score</div>
+        <div class="hero-counts">
+          <span class="count-pill ok"><b id="site-count-strong">0</b> strong</span>
+          <span class="count-pill warn"><b id="site-count-fair">0</b> fair</span>
+          <span class="count-pill fail"><b id="site-count-weak">0</b> weak</span>
+        </div>
+      </div>
+      <div class="hero-meters" id="site-meters"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Crawl</h2>
+        <div class="panel-actions">
+          <span class="mono-note" id="site-crawled-at"></span>
+          <button class="ghost" id="site-export">Export JSON</button>
+        </div>
+      </div>
+      <dl class="factsheet" id="site-factsheet"></dl>
+    </section>
+
+    <nav class="tabs" id="site-tabs">
+      <button class="tab is-active" data-stab="overview">Priorities</button>
+      <button class="tab" data-stab="issues">Site issues</button>
+      <button class="tab" data-stab="pages">Pages</button>
+    </nav>
+
+    <div class="tab-panel is-active" data-spanel="overview">
+      <section class="panel" id="site-vitals-panel" hidden>
+        <div class="panel-head">
+          <h2>Core Web Vitals</h2>
+          <span class="mono-note" id="site-vitals-note"></span>
+        </div>
+        <div id="site-vitals-body"></div>
+      </section>
+      <div id="site-todos"></div>
+    </div>
+    <div class="tab-panel" data-spanel="issues"><div id="site-issues"></div></div>
+    <div class="tab-panel" data-spanel="pages"><div id="site-pages"></div></div>
+  </main>
+
   <main id="results" hidden>
+    <div class="back-strip" id="back-strip" hidden>
+      <button class="ghost" id="back-to-site">← Back to site report</button>
+    </div>
+
     <!-- Score summary -->
     <section class="hero">
       <div class="hero-gauge">
@@ -77,6 +150,14 @@
 
     <!-- Report tab -->
     <div class="tab-panel is-active" data-panel="report">
+      <section class="panel" id="vitals-panel" hidden>
+        <div class="panel-head">
+          <h2>Core Web Vitals</h2>
+          <span class="mono-note" id="vitals-note"></span>
+        </div>
+        <div id="vitals-body"></div>
+      </section>
+
       <section class="panel" id="todo-panel">
         <div class="panel-head">
           <h2>To-do list</h2>
