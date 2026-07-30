@@ -58,7 +58,7 @@ something other than what was intended.
 
 ## Whole-site crawl
 
-Switch the mode toggle to **Whole site** to crawl and audit up to 50 pages, then
+Switch the mode toggle to **Whole site** to crawl and audit up to 100 pages, then
 score the site as a whole. This finds the class of problem a single-page audit
 structurally cannot see.
 
@@ -96,6 +96,24 @@ Jobs are in-memory and expire after 15 minutes. Redirects are resolved before th
 crawl starts, so a seed of `example.com` that 301s to `www.example.com` anchors
 the crawl to the destination rather than auditing the home page twice and
 reporting itself as a duplicate.
+
+### Memory on capped hosts
+
+Node assumes it may grow its heap to roughly 2 GB. Inside a 512 MB container it
+never feels pressure, so it expands until the platform OOM-kills it — even though
+the crawler's live set is small (heap returns to baseline after collection; only
+the ~200 kB result is retained). Capping the heap makes V8 collect instead of
+expand, at no cost in speed:
+
+| 70-page crawl | Peak RSS | Time |
+|---|---|---|
+| default heap | 493 MB | 6.8s |
+| `--max-old-space-size=192` | 198 MB | 7.2s |
+
+`render.yaml` sets `NODE_OPTIONS=--max-old-space-size=384`. Measured with that
+cap, a **full 100-page crawl peaks at 197 MB and finishes in 9.6s**. Raise the
+cap alongside the instance size; leave headroom, since the figure is the heap
+only, not total process memory.
 
 ## Core Web Vitals
 
@@ -212,7 +230,8 @@ trusts exactly one hop, so a client cannot forge its own `X-Forwarded-For`.
 | `MAX_CONCURRENT_GLOBAL` | `8` | Simultaneous audits process-wide |
 | `CRAWL_RATE_LIMIT_MAX` | `3` | Crawls per IP per crawl window |
 | `CRAWL_RATE_LIMIT_WINDOW_MS` | `900000` | Crawl window length (15 min) |
-| `MAX_CRAWL_PAGES` | `50` | Hard ceiling on pages per crawl |
+| `MAX_CRAWL_PAGES` | `100` | Hard ceiling on pages per crawl |
+| `NODE_OPTIONS` | unset | Set `--max-old-space-size=384` on memory-capped hosts (see below) |
 | `MAX_CONCURRENT_CRAWLS` | `2` | Crawls running process-wide (1 per IP) |
 | `TRUST_PROXY_HOPS` | `1` | Proxy hops in front of the app; use `0` if none |
 | `CRUX_API_KEY` | unset | Chrome UX Report API key; enables the Core Web Vitals category (`PAGESPEED_API_KEY` is also accepted) |
@@ -242,9 +261,11 @@ limited, so it doubles as an uptime-monitor and keep-warm target.
   correctly spelled wrong word.
 - **Duplicate content is only checked within the page.** Cross-page duplication
   needs a full-site crawl.
-- **Crawls are bounded.** Up to 50 pages, four levels deep, on a three-minute
+- **Crawls are bounded.** Up to 100 pages, four levels deep, on a five-minute
   budget. Larger sites are sampled, not exhaustively covered, so "possible
   orphans" and duplicate groups describe the pages crawled — not the whole site.
+  A crawl that runs out of budget reports `stoppedEarly` rather than implying it
+  saw everything.
 - **Crawl state is in memory.** Jobs expire after 15 minutes and are lost on
   deploy; there is no audit history.
 - **Public hosts only.** Intranet sites and `localhost` are blocked by the SSRF

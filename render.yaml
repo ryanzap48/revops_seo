@@ -8,3 +8,10 @@ services:
     branch: main
     buildCommand: npm ci
     startCommand: npm start
+    envVars:
+      # Node otherwise assumes it may use ~2 GB and lets its heap grow until the
+      # container OOM-kills it. Capping the heap makes V8 collect instead of
+      # expand: a measured 70-page crawl peaks at ~200 MB with this set, versus
+      # ~490 MB without, at identical speed. Raise with the instance size.
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=384

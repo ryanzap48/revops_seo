@@ -36,7 +36,7 @@ const crawlLimiter = createRateLimiter({
   maxConcurrentGlobal: 4,
 });
 
-const MAX_CRAWL_PAGES = Number(process.env.MAX_CRAWL_PAGES ?? 50);
+const MAX_CRAWL_PAGES = Number(process.env.MAX_CRAWL_PAGES ?? 100);
 const MAX_CONCURRENT_CRAWLS = Number(process.env.MAX_CONCURRENT_CRAWLS ?? 2);
 const jobs = createJobStore();
 
