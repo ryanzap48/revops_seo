@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RevOps SEO — Page Checker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Work+Sans:wght@400;500;600;700&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="site-head">
+    <h1 class="brand">
+      <span class="brand-word">RevOps</span>
+      <span class="brand-rule"></span>
+      <span class="brand-sub">SEO</span>
+    </h1>
+    <div class="tagline">Page checker · on-page, technical &amp; content audit</div>
+  </header>
+
+  <section class="search-card">
+    <label class="search-label" for="url">Page to check</label>
+    <div class="search-row">
+      <input type="text" id="url" placeholder="https://example.com/page" autocomplete="off" spellcheck="false">
+      <button class="run" id="run">Check page</button>
+    </div>
+    <p class="error" id="error" hidden></p>
+    <div class="loading" id="loading" hidden>
+      <span id="loading-text">Fetching the page, robots.txt, sitemap, host variants and TLS handshake…</span>
+      <div class="bar"><i></i></div>
+    </div>
+  </section>
+
+  <main id="results" hidden>
+    <!-- Score summary -->
+    <section class="hero">
+      <div class="hero-gauge">
+        <div class="gauge">
+          <svg viewBox="0 0 160 160" aria-hidden="true">
+            <circle class="gauge-track" cx="80" cy="80" r="68" />
+            <circle class="gauge-fill" id="gauge-fill" cx="80" cy="80" r="68" />
+          </svg>
+          <div class="gauge-val">
+            <strong id="score-num">–</strong>
+            <span id="score-verdict"></span>
+          </div>
+        </div>
+        <div class="gauge-caption">On-page score</div>
+        <div class="hero-counts">
+          <span class="count-pill fail"><b id="count-errors">0</b> issues</span>
+          <span class="count-pill warn"><b id="count-warnings">0</b> warnings</span>
+          <span class="count-pill ok"><b id="count-passed">0</b> passed</span>
+        </div>
+      </div>
+      <div class="hero-meters" id="hero-meters"></div>
+    </section>
+
+    <!-- Page fact sheet -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>HTML page</h2>
+        <div class="panel-actions">
+          <span class="mono-note" id="analyzed-at"></span>
+          <button class="ghost" id="export">Export JSON</button>
+        </div>
+      </div>
+      <dl class="factsheet" id="factsheet"></dl>
+    </section>
+
+    <nav class="tabs" id="tabs">
+      <button class="tab is-active" data-tab="report">Report</button>
+      <button class="tab" data-tab="elements">Elements</button>
+      <button class="tab" data-tab="keywords">Keyword check</button>
+    </nav>
+
+    <!-- Report tab -->
+    <div class="tab-panel is-active" data-panel="report">
+      <section class="panel" id="todo-panel">
+        <div class="panel-head">
+          <h2>To-do list</h2>
+          <span class="mono-note">Tasks sorted by priority</span>
+        </div>
+        <div id="todos"></div>
+      </section>
+
+      <div class="section-rule"><span>Checks</span></div>
+      <div id="checks"></div>
+    </div>
+
+    <!-- Elements tab -->
+    <div class="tab-panel" data-panel="elements">
+      <div id="elements"></div>
+    </div>
+
+    <!-- Keywords tab -->
+    <div class="tab-panel" data-panel="keywords">
+      <div id="keywords"></div>
+    </div>
+  </main>
+
+  <footer class="site-foot">
+    <p>
+      RevOps SEO inspects the single URL you submit. Pair it with a full-site crawl, Search Console and field
+      performance data (PageSpeed Insights) for the complete picture. Backlink metrics require an external link
+      index and are deliberately not estimated.
+    </p>
+  </footer>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

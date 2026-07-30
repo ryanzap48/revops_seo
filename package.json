@@ -1,0 +1,14 @@
+{
+  "name": "revops-seo",
+  "version": "1.0.0",
+  "description": "RevOps SEO page checker - audits a URL across 32 weighted checks and returns a scored report, priority to-do list, element inventory and keyword profile",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "cheerio": "^1.0.0"
+  }
+}
