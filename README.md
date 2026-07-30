@@ -76,6 +76,8 @@ from the score and reweighted out, rather than being guessed at.
 | `server.js` | Express server; `GET`/`POST /api/analyze` |
 | `analyzer.js` | Orchestration and every check definition |
 | `lib/http.js` | HTTP client on `node:http(s)` — raw Content-Encoding, transfer size, redirect chain, per-request timings, ALPN/TLS probe, robots.txt and sitemap fetchers |
+| `lib/guard.js` | SSRF guard: rejects non-public targets and pins sockets to validated addresses |
+| `lib/ratelimit.js` | Per-IP request quota plus per-client and global concurrency caps |
 | `lib/extract.js` | HTML → document model (headings, paragraphs, media, links, meta, structured data, mixed content) |
 | `lib/checks.js` | Category/check/finding scoring skeleton |
 | `lib/text.js` | Tokenising, stop words, sentence splitting, language detection, text-issue scan, keyword extraction |
@@ -85,6 +87,56 @@ from the score and reweighted out, rather than being guessed at.
 `fetch` is deliberately not used for the page request: it hides the original
 `Content-Encoding`, the pre-decompression transfer size, the redirect chain and
 the negotiated protocol — all of which the server checks report on.
+
+## Security
+
+A service that fetches any URL a caller supplies is an SSRF vector: left open, a
+request for `http://169.254.169.254/` makes the server read its own cloud
+metadata (which can hand out IAM credentials), and private addresses turn it into
+an internal network scanner.
+
+`lib/guard.js` runs inside `requestOnce`, the single function every outbound
+request passes through — the page, robots.txt, the sitemap, the favicon probe,
+the www/non-www check, and **each hop of a redirect chain**. It:
+
+- allows only `http:` and `https:`, and only ports 80/443 below 1024;
+- resolves the hostname and refuses if **any** returned address is loopback,
+  link-local, private, CGNAT, multicast or reserved — in IPv4 or IPv6, including
+  the IPv4 embedded in v4-mapped, NAT64 and 6to4 addresses;
+- **pins the socket to an address it validated**, via the `lookup` option. Checking
+  a hostname and then letting the socket resolve it again leaves a DNS-rebinding
+  window where the attacker's resolver answers publicly for the check and
+  privately for the connection.
+
+Decimal (`http://2130706433/`), hex (`http://0x7f.0.0.1/`), short-form
+(`http://127.1/`) and resolver-based (`http://127.0.0.1.nip.io/`) encodings are all
+covered, because the check runs on resolved addresses rather than on URL text.
+
+Rate limiting (`lib/ratelimit.js`) applies to both `/api/analyze` routes: a per-IP
+quota, a per-client in-flight cap so one caller cannot queue slow audits, and a
+global in-flight cap so the process cannot exhaust its sockets. Rejected requests
+count against the quota, which also throttles anyone scanning for internal hosts.
+Counters are in-memory — per instance, reset on deploy — which is the right trade
+for one small service. Put Redis behind it only if you scale to several instances.
+
+`app.set('trust proxy', 1)` is set because Render, Railway and Fly each add one
+proxy hop; without it every caller would share a single rate-limit bucket. It
+trusts exactly one hop, so a client cannot forge its own `X-Forwarded-For`.
+
+## Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PORT` | `3000` | Set automatically by most hosts |
+| `RATE_LIMIT_MAX` | `20` | Audits per IP per window |
+| `RATE_LIMIT_WINDOW_MS` | `300000` | Window length (5 min) |
+| `MAX_CONCURRENT_PER_CLIENT` | `2` | Simultaneous audits per IP |
+| `MAX_CONCURRENT_GLOBAL` | `8` | Simultaneous audits process-wide |
+| `TRUST_PROXY_HOPS` | `1` | Proxy hops in front of the app; use `0` if none |
+| `ALLOW_PRIVATE_HOSTS` | unset | `true` disables the SSRF guard so you can audit `localhost`. **Local development only** — the server logs a warning at boot when it is on |
+
+`GET /health` returns `{ ok, trackedClients, globalActive }` and is not rate
+limited, so it doubles as an uptime-monitor and keep-warm target.
 
 ## Limitations, stated plainly
 
@@ -105,6 +157,9 @@ the negotiated protocol — all of which the server checks report on.
   needs a full-site crawl.
 - **One page per run.** Site-wide issues (duplicate titles across pages, orphan
   pages, internal link graph) need a crawler.
+- **Public hosts only.** Intranet sites and `localhost` are blocked by the SSRF
+  guard. Set `ALLOW_PRIVATE_HOSTS=true` locally if you need to audit one, and
+  never set it on a deployed instance.
 
 ## Possible next steps
 

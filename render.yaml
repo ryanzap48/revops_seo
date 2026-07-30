@@ -1,0 +1,10 @@
+# Render Blueprint. Create the service with: Render dashboard → New → Blueprint.
+# The Node version comes from "engines" in package.json.
+services:
+  - type: web
+    name: revops-seo
+    runtime: node
+    plan: free
+    branch: main
+    buildCommand: npm ci
+    startCommand: npm start

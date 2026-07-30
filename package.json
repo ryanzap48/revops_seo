@@ -4,6 +4,9 @@
   "description": "RevOps SEO page checker - audits a URL across 32 weighted checks and returns a scored report, priority to-do list, element inventory and keyword profile",
   "type": "module",
   "main": "server.js",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node server.js"
   },
