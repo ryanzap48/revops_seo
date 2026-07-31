@@ -6,9 +6,10 @@
 // Categories and weights live in lib/checks.js. Findings are one point each so
 // that a "7/8" always maps to one identifiable line of text.
 
-import { fetchPage, fetchRobots, fetchSitemap, probe, negotiatedProtocol, resolveHost } from './lib/http.js';
+import { fetchPage, fetchRobots, fetchSitemap, fetchLlmsTxt, probe, negotiatedProtocol, resolveHost } from './lib/http.js';
 import { extract } from './lib/extract.js';
-import { createAudit, verdict } from './lib/checks.js';
+import { createAudit, verdict, CATEGORY_SETS } from './lib/checks.js';
+import { analyzeGeoSignals, runGeoChecks, evaluateCrawlerAccess, ROLE_LABEL } from './lib/geo.js';
 import { extractKeywords, tokenize, STOP_WORDS } from './lib/text.js';
 import { titlePixels, descriptionPixels, TITLE_MAX_PX, DESC_MAX_PX } from './lib/pixels.js';
 import { robotsDisallows } from './lib/robots.js';
@@ -35,18 +36,19 @@ export async function buildSiteContext(originUrl) {
     resolveHost(origin.hostname),
   ]);
 
-  const [sitemap, hostVariant, httpsRedirect, originVitals] = await Promise.all([
+  const [sitemap, hostVariant, httpsRedirect, originVitals, llms] = await Promise.all([
     fetchSitemap(robots.sitemaps?.[0] || `${origin.origin}/sitemap.xml`),
     checkHostVariant(origin),
     isHttps ? checkHttpUpgrade(origin) : Promise.resolve({ tested: false }),
     // Origin-level field data is the fallback for every page that is itself too
     // low-traffic to appear in CrUX, so a crawl fetches it once.
     cruxConfigured() ? fetchFieldData({ origin: origin.origin }) : Promise.resolve({ available: false, reason: 'no-key' }),
+    fetchLlmsTxt(origin.origin),
   ]);
 
   return {
     origin: origin.origin,
-    robots, transport, host, sitemap, hostVariant, httpsRedirect, originVitals,
+    robots, transport, host, sitemap, hostVariant, httpsRedirect, originVitals, llms,
     faviconCache: new Map(),
   };
 }
@@ -54,10 +56,13 @@ export async function buildSiteContext(originUrl) {
 /**
  * Audit one page.
  * @param {string} inputUrl
- * @param {{site?: object}} [options] `site` reuses a context from
- *        buildSiteContext(); it is ignored if it belongs to a different origin.
+ * @param {{site?: object, mode?: 'seo'|'geo', skipVitals?: boolean}} [options]
+ *        `site` reuses a context from buildSiteContext(); it is ignored if it
+ *        belongs to a different origin. `mode` selects the SEO or GEO ruleset —
+ *        both read the same fetched document, only the checks differ.
  */
 export async function analyze(inputUrl, options = {}) {
+  const mode = options.mode === 'geo' ? 'geo' : 'seo';
   const requested = normalizeUrl(inputUrl);
 
   const page = await fetchPage(requested.href);
@@ -69,22 +74,32 @@ export async function analyze(inputUrl, options = {}) {
   const { robots, transport, host, sitemap, hostVariant, httpsRedirect } = site;
 
   const [faviconCheck, vitals] = await Promise.all([
-    checkFavicon(doc, finalUrl, site.faviconCache),
-    options.skipVitals
+    mode === 'seo' ? checkFavicon(doc, finalUrl, site.faviconCache) : Promise.resolve({ ok: true, declared: false, url: null }),
+    options.skipVitals || mode === 'geo'
       ? Promise.resolve({ available: false, reason: 'skipped' })
       : fetchPageFieldData(finalUrl.href, site.originVitals),
   ]);
 
   const htmlBytes = page.body.length;
-  const audit = createAudit();
+  const audit = createAudit(CATEGORY_SETS[mode]);
 
-  runMetaChecks(audit, { doc, page, finalUrl, robots, faviconCheck, host, transport });
-  runQualityChecks(audit, { doc, page, finalUrl, htmlBytes, transport });
-  runStructureChecks(audit, { doc });
-  runLinkChecks(audit, { doc });
-  runServerChecks(audit, { doc, page, finalUrl, htmlBytes, robots, sitemap, transport, hostVariant, httpsRedirect });
-  runVitalsChecks(audit, { vitals });
-  runExternalChecks(audit, { doc });
+  // GEO-only derivations; skipped entirely on an SEO run so it costs nothing.
+  const geo = mode === 'geo' ? analyzeGeoSignals(doc, finalUrl.href) : null;
+  const access = mode === 'geo'
+    ? { available: robots.found, ...evaluateCrawlerAccess(robots.found ? robots.text : '', finalUrl.pathname + finalUrl.search) }
+    : null;
+
+  if (mode === 'geo') {
+    runGeoChecks(audit, { doc, geo, access, llms: site.llms || { found: false }, page, finalUrl });
+  } else {
+    runMetaChecks(audit, { doc, page, finalUrl, robots, faviconCheck, host, transport });
+    runQualityChecks(audit, { doc, page, finalUrl, htmlBytes, transport });
+    runStructureChecks(audit, { doc });
+    runLinkChecks(audit, { doc });
+    runServerChecks(audit, { doc, page, finalUrl, htmlBytes, robots, sitemap, transport, hostVariant, httpsRedirect });
+    runVitalsChecks(audit, { vitals });
+    runExternalChecks(audit, { doc });
+  }
 
   const scored = audit.finalize();
 
@@ -100,6 +115,7 @@ export async function analyze(inputUrl, options = {}) {
   });
 
   return {
+    mode,
     requestedUrl: requested.href,
     analyzedAt: new Date().toISOString(),
 
@@ -144,6 +160,24 @@ export async function analyze(inputUrl, options = {}) {
     },
 
     vitals,
+    // The AI-visibility view of the page, for the GEO detail panel.
+    geo: mode === 'geo' ? {
+      crawlers: access.bots.map((b) => ({ ua: b.ua, vendor: b.vendor, surface: b.surface, role: b.role, roleLabel: ROLE_LABEL[b.role], allowed: b.allowed, rule: b.rule })),
+      blocked: { retrieval: access.blockedRetrieval.length, userTriggered: access.blockedUserTriggered.length, training: access.blockedTraining.length },
+      llms: site.llms || { found: false },
+      sections: geo.sections,
+      questionHeadings: geo.questionHeadings.map((h) => h.text),
+      statistics: geo.statistics,
+      quotations: geo.quotations,
+      citations: geo.citations,
+      authoritativeCitations: geo.authoritativeCitations.length,
+      freshness: geo.freshness,
+      entity: geo.entity,
+      schemaTypes: geo.schemaTypes,
+      clientRendered: geo.clientRendered,
+      opening: doc.paragraphs[0] || null,
+      openingWords: geo.firstParagraphWords,
+    } : null,
     categories: scored.categories,
     todos: scored.todos,
     elements: buildElements({ doc, page, transport, keywords, keywordScope }),
@@ -1048,10 +1082,6 @@ function buildElements({ doc, page, transport, keywords, keywordScope }) {
     },
   };
 }
-
-// ---------------------------------------------------------------------------
-// Supporting probes & utilities
-// ---------------------------------------------------------------------------
 
 async function checkFavicon(doc, finalUrl, cache) {
   const declared = doc.favicons.find((f) => f.href);

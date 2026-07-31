@@ -43,7 +43,9 @@ const jobs = createJobStore();
 app.use(express.json({ limit: '8kb' }));
 app.use(express.static(join(__dirname, 'public')));
 
-async function handleAnalyze(url, res) {
+const toMode = (value) => (String(value || '').toLowerCase() === 'geo' ? 'geo' : 'seo');
+
+async function handleAnalyze(url, res, mode = 'seo') {
   if (!url || typeof url !== 'string') {
     return res.status(400).json({ error: 'Please provide a URL to analyze.' });
   }
@@ -53,8 +55,8 @@ async function handleAnalyze(url, res) {
 
   try {
     const started = Date.now();
-    const report = await analyze(url);
-    console.log(`analyzed ${report.page.url} → ${report.score.overall}% in ${Date.now() - started} ms`);
+    const report = await analyze(url, { mode });
+    console.log(`analyzed [${mode}] ${report.page.url} → ${report.score.overall}% in ${Date.now() - started} ms`);
     res.json(report);
   } catch (err) {
     // A blocked target is the caller's mistake (400), not a server failure.
@@ -75,8 +77,8 @@ async function handleAnalyze(url, res) {
   }
 }
 
-app.post('/api/analyze', limiter, (req, res) => handleAnalyze(req.body?.url, res));
-app.get('/api/analyze', limiter, (req, res) => handleAnalyze(req.query.url, res));
+app.post('/api/analyze', limiter, (req, res) => handleAnalyze(req.body?.url, res, toMode(req.body?.mode)));
+app.get('/api/analyze', limiter, (req, res) => handleAnalyze(req.query.url, res, toMode(req.query.mode)));
 
 // ---- Site crawl: start a job, then poll it --------------------------------
 
@@ -98,17 +100,19 @@ app.post('/api/crawl', crawlLimiter, (req, res) => {
     return res.status(503).json({ error: 'Another site crawl is already running. Try again shortly.' });
   }
 
-  const job = jobs.create(ownerKey, { url, maxPages });
-  res.status(202).json({ jobId: job.id, status: job.status, maxPages });
+  const mode = toMode(req.body?.mode);
+  const job = jobs.create(ownerKey, { url, maxPages, mode });
+  res.status(202).json({ jobId: job.id, status: job.status, maxPages, mode });
 
   // Runs past the lifetime of this response; the client polls for progress.
   crawlSite(url, {
     maxPages,
+    mode,
     onProgress: (progress) => jobs.update(job.id, { progress }),
   })
     .then((result) => {
       jobs.update(job.id, { status: 'done', result });
-      console.log(`crawled ${result.origin} → ${result.crawl.crawled} pages, ${result.score.overall}% in ${result.durationMs} ms`);
+      console.log(`crawled [${mode}] ${result.origin} → ${result.crawl.crawled} pages, ${result.score.overall}% in ${result.durationMs} ms`);
     })
     .catch((err) => {
       const message = err.blocked ? err.message : `Crawl failed: ${err.message}`;

@@ -92,6 +92,15 @@ POST /api/crawl        {"url": "example.com", "maxPages": 25}  →  202 {"jobId"
 GET  /api/crawl/:jobId                                          →  progress, then result
 ```
 
+The same crawl runs headless, for callers that want the JSON and nothing else —
+the weekly analytics PDF uses this:
+
+```bash
+node crawl-cli.js --url revops.health --mode geo --max-pages 100 --out geo.json
+```
+
+Progress goes to stderr; without `--out` the report is written to stdout.
+
 Jobs are in-memory and expire after 15 minutes. Redirects are resolved before the
 crawl starts, so a seed of `example.com` that 301s to `www.example.com` anchors
 the crawl to the destination rather than auditing the home page twice and
@@ -114,6 +123,45 @@ expand, at no cost in speed:
 cap, a **full 100-page crawl peaks at 197 MB and finishes in 9.6s**. Raise the
 cap alongside the instance size; leave headroom, since the figure is the heap
 only, not total process memory.
+
+## GEO — Generative Engine Optimization
+
+The `SEO / GEO` switch in the masthead runs the same pipeline — same fetch, same
+document model, same crawler, same scoring — against a different ruleset. GEO
+asks whether an AI answer engine can fetch the page, extract a passage from it,
+and have reason to cite it.
+
+| Category | Weight | Checks |
+|---|---|---|
+| AI crawler access | 24% | Retrieval / user-triggered / training crawler access, availability, server-rendered content, llms.txt |
+| Answer readiness | 26% | Opening answer, passage structure, extractable formatting, answer depth |
+| Evidence & citations | 22% | Statistics, quotations, source citations, freshness |
+| Entity & authority | 16% | Publisher entity, sameAs, authorship, verifiability |
+| Machine readability | 12% | Structured data, semantic HTML, described media |
+
+Two decisions worth knowing, because they are where most GEO advice goes wrong:
+
+**Weighting follows the evidence.** The KDD 2024 paper
+[*GEO: Generative Engine Optimization*](https://arxiv.org/abs/2311.09735) tested
+nine content strategies over 10,000 queries and found that adding statistics,
+quotations and citations raised citation rates by up to 40%, while keyword
+density — the classic SEO lever — barely moved them. So evidence signals carry
+the heavy weight and keyword density is not scored here at all.
+
+**Training crawlers and retrieval crawlers are not the same thing.** Blocking
+GPTBot or ClaudeBot opts out of model training and costs nothing in citations.
+Blocking OAI-SearchBot, PerplexityBot or Claude-SearchBot removes the page from
+the answers themselves. This tool reports a training-crawler block as neutral
+information and only penalises retrieval blocks — conflating the two would push
+publishers into a licensing decision the tool has no business making for them.
+robots.txt is evaluated per user-agent, honouring the rule that a specific group
+overrides `*`.
+
+llms.txt is checked but weighted as *nice to have*: adoption sits near 9% of top
+sites and no measured citation lift has been demonstrated, so scoring it heavily
+would be inventing a signal.
+
+Both modes support single-page and whole-site crawls, with the same page limits.
 
 ## Core Web Vitals
 
@@ -171,6 +219,7 @@ from the score and reweighted out, rather than being guessed at.
 | `lib/jobs.js` | In-memory job store for crawls, with TTL and stale-job reaping |
 | `lib/robots.js` | robots.txt rule matching, shared by the check and the crawler |
 | `lib/vitals.js` | Chrome UX Report client, thresholds and rating logic |
+| `lib/geo.js` | AI crawler registry, evidence detection and the GEO ruleset |
 | `lib/http.js` | HTTP client on `node:http(s)` — raw Content-Encoding, transfer size, redirect chain, per-request timings, ALPN/TLS probe, robots.txt and sitemap fetchers |
 | `lib/guard.js` | SSRF guard: rejects non-public targets and pins sockets to validated addresses |
 | `lib/ratelimit.js` | Per-IP request quota plus per-client and global concurrency caps |
@@ -268,6 +317,14 @@ limited, so it doubles as an uptime-monitor and keep-warm target.
   saw everything.
 - **Crawl state is in memory.** Jobs expire after 15 minutes and are lost on
   deploy; there is no audit history.
+- **GEO measures readiness, not outcomes.** It checks whether a page is fetchable,
+  extractable and worth citing. It cannot tell you whether ChatGPT or Perplexity
+  *actually* cites you — that needs prompt-level monitoring against those engines,
+  which is a different product. Treat the score as a diagnostic, not a rank.
+- **Evidence detection is pattern-based.** Statistics are matched by shape
+  (percentages, currency, scaled counts) across paragraphs, headings, list items
+  and table cells; quotations by markup and quote characters. A quote presented
+  without quotation marks or `<blockquote>` will not be counted.
 - **Public hosts only.** Intranet sites and `localhost` are blocked by the SSRF
   guard. Set `ALLOW_PRIVATE_HOSTS=true` locally if you need to audit one, and
   never set it on a deployed instance.

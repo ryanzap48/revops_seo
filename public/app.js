@@ -23,7 +23,8 @@ const el = {
 const GAUGE_CIRCUMFERENCE = 2 * Math.PI * 68;
 let lastReport = null;
 let lastSiteReport = null;
-let mode = 'page';
+let mode = 'page';   // page | site
+let tool = 'seo';    // seo  | geo
 
 const PROGRESS_STEPS = [
   'Fetching the page, robots.txt, sitemap, host variants and TLS handshake…',
@@ -142,7 +143,7 @@ async function runAudit(targetUrl, { keepSiteReport = false } = {}) {
     const res = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ url, mode: tool }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'The audit failed.');
@@ -176,7 +177,7 @@ async function runCrawl() {
     const res = await fetch('/api/crawl', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, maxPages }),
+      body: JSON.stringify({ url, maxPages, mode: tool }),
     });
     const started = await res.json();
     if (!res.ok) throw new Error(started.error || 'The crawl could not be started.');
@@ -229,7 +230,9 @@ const RATING_INK = { good: 'var(--green-ink)', 'needs-improvement': 'var(--amber
 
 /** Field-data panel, shared by the page report and the site report. */
 function renderVitalsInto(panel, noteEl, bodyEl, vitals) {
-  if (!vitals) { panel.hidden = true; return; }
+  // Core Web Vitals belong to the SEO ruleset; a GEO run skips fetching them, so
+  // the panel must stay hidden rather than reporting them as merely unavailable.
+  if (!vitals || vitals.reason === 'skipped') { panel.hidden = true; return; }
   panel.hidden = false;
 
   if (!vitals.available) {
@@ -273,9 +276,71 @@ function renderVitalsInto(panel, noteEl, bodyEl, vitals) {
     </div>`;
 }
 
+const ROLE_COPY = {
+  retrieval: ['Retrieval crawlers', 'These decide whether this page can be quoted in an AI answer. Blocking one removes you from that engine entirely.'],
+  'user-triggered': ['User-triggered fetchers', 'These load the page when a reader follows or expands a citation. Blocking them breaks the click-through.'],
+  training: ['Training crawlers', 'These collect text for model training. Blocking them is a licensing decision and does not affect whether you can be cited.'],
+};
+
+/** AI crawler access, grouped by what each bot actually decides. */
+function renderGeoPanels(d) {
+  const geoPanel = $('#geo-panel');
+  const evidencePanel = $('#evidence-panel');
+
+  if (d.mode !== 'geo' || !d.geo) {
+    geoPanel.hidden = true;
+    evidencePanel.hidden = true;
+    return;
+  }
+  geoPanel.hidden = false;
+  evidencePanel.hidden = false;
+
+  const g = d.geo;
+  $('#geo-note').textContent = g.blocked.retrieval > 0
+    ? `${g.blocked.retrieval} retrieval crawler${g.blocked.retrieval === 1 ? '' : 's'} blocked`
+    : 'all retrieval crawlers allowed';
+
+  $('#geo-body').innerHTML = ['retrieval', 'user-triggered', 'training'].map((role) => {
+    const bots = g.crawlers.filter((b) => b.role === role);
+    if (!bots.length) return '';
+    const [title, blurb] = ROLE_COPY[role];
+    return `
+      <div class="bot-role"><h3>${esc(title)}</h3><p>${esc(blurb)}</p></div>
+      <div class="bot-grid">
+        ${bots.map((b) => `
+          <span class="bot ${b.allowed ? (role === 'training' ? 'neutral' : 'allowed') : 'blocked'}" title="${esc(b.vendor)} · ${esc(b.surface)}${b.rule ? ` · blocked by "Disallow: ${esc(b.rule)}"` : ''}">
+            <span class="dot"></span>${esc(b.ua)}<em>${b.allowed ? 'allowed' : 'blocked'}</em>
+          </span>`).join('')}
+      </div>`;
+  }).join('');
+
+  const stat = (k, v, s, samples = []) => `
+    <div class="evidence-cell">
+      <div class="k">${esc(k)}</div>
+      <div class="v" style="color:${v > 0 ? 'var(--green-ink)' : 'var(--red-ink)'}">${v}</div>
+      <div class="s">${esc(s)}</div>
+      ${samples.length ? `<div class="evidence-samples">${samples.map((x) => `<span>${esc(x)}</span>`).join('')}</div>` : ''}
+    </div>`;
+
+  const hosts = [...new Set(g.citations.filter((c) => c.authoritative).map((c) => c.host))].slice(0, 4);
+  $('#evidence-body').innerHTML = `
+    <div class="evidence-grid">
+      ${stat('Statistics', g.statistics.count, 'passages carrying a concrete figure', g.statistics.samples.slice(0, 5))}
+      ${stat('Quotations', g.quotations.marked, `${g.quotations.blockquotes} blockquote, ${g.quotations.quotedPassages} in quotation marks`)}
+      ${stat('Citations', g.citations.length, `${g.authoritativeCitations} to recognised authorities`, hosts)}
+      ${stat('Question headings', g.questionHeadings.length, 'headings phrased the way people ask', g.questionHeadings.slice(0, 3))}
+    </div>
+    <div class="vitals-verdict ${g.statistics.count && g.quotations.marked && g.authoritativeCitations ? 'pass' : 'fail'}">
+      ${g.statistics.count && g.quotations.marked && g.authoritativeCitations
+        ? 'All three evidence levers are present — statistics, quotations and authoritative citations.'
+        : `Missing: ${[!g.statistics.count && 'statistics', !g.quotations.marked && 'marked-up quotations', !g.authoritativeCitations && 'authoritative citations'].filter(Boolean).join(', ')}. These were the strongest measured levers for AI citation.`}
+    </div>`;
+}
+
 function render(d) {
   renderHero(d);
   renderFactsheet(d);
+  renderGeoPanels(d);
   renderVitalsInto($('#vitals-panel'), $('#vitals-note'), $('#vitals-body'), d.vitals);
   renderTodos(d);
   renderChecks(d);
@@ -289,6 +354,7 @@ function render(d) {
 }
 
 function renderHero(d) {
+  $('#score-caption').textContent = d.mode === 'geo' ? 'AI visibility score' : 'On-page score';
   el.scoreNum.textContent = `${d.score.overall}%`;
   el.scoreNum.style.color = scoreInk(d.score.overall);
   el.scoreVerdict.textContent = d.score.verdict;
@@ -539,6 +605,7 @@ function renderKeywords(d) {
 // ---------------------------------------------------------------------------
 
 function renderSite(d) {
+  $('#site-score-caption').textContent = d.mode === 'geo' ? 'Site AI visibility' : 'Site score';
   el.siteScoreNum.textContent = `${d.score.overall}%`;
   el.siteScoreNum.style.color = scoreInk(d.score.overall);
   el.siteScoreVerdict.textContent = d.score.verdict;
@@ -557,7 +624,7 @@ function renderSite(d) {
     </div>`).join('');
 
   renderSiteFactsheet(d);
-  renderVitalsInto($('#site-vitals-panel'), $('#site-vitals-note'), $('#site-vitals-body'), d.vitals);
+  renderVitalsInto($('#site-vitals-panel'), $('#site-vitals-note'), $('#site-vitals-body'), d.mode === 'geo' ? null : d.vitals);
   renderSiteTodos(d);
   renderSiteIssues(d);
   renderSitePages(d);
@@ -744,6 +811,51 @@ el.modeSwitch.addEventListener('click', (event) => {
   if (button) setMode(button.dataset.mode);
 });
 
+const TOOL_COPY = {
+  seo: {
+    tagline: 'Page checker · on-page, technical &amp; content audit',
+    loading: [
+      'Fetching the page, robots.txt, sitemap, host variants and TLS handshake…',
+      'Parsing the DOM: headings, paragraphs, media, links and meta tags…',
+      'Running 33 checks across meta data, content, structure, links and server config…',
+      'Scoring findings and extracting the keyword profile…',
+    ],
+  },
+  geo: {
+    tagline: 'AI visibility checker · generative engine optimization',
+    loading: [
+      'Fetching the page, robots.txt and llms.txt…',
+      'Testing which AI crawlers may fetch this URL…',
+      'Measuring passage structure, statistics, quotations and citations…',
+      'Scoring answer readiness and publisher authority…',
+    ],
+  },
+};
+
+/** Switch between the SEO and GEO rulesets. Same pipeline, different checks. */
+function setTool(next) {
+  if (next === tool) return;
+  tool = next;
+  document.querySelectorAll('.brand-tool').forEach((b) => b.classList.toggle('is-active', b.dataset.tool === next));
+  $('#tagline').innerHTML = TOOL_COPY[next].tagline;
+  PROGRESS_STEPS.splice(0, PROGRESS_STEPS.length, ...TOOL_COPY[next].loading);
+  document.title = next === 'geo' ? 'RevOps GEO — AI Visibility Checker' : 'RevOps SEO — Page Checker';
+
+  // The two rulesets produce different categories and panels, so a report from
+  // the other tool would be a confusing thing to leave on screen.
+  el.results.hidden = true;
+  el.siteResults.hidden = true;
+  el.backStrip.hidden = true;
+  el.error.hidden = true;
+  lastReport = null;
+  lastSiteReport = null;
+}
+
+$('#tool-switch').addEventListener('click', (event) => {
+  const button = event.target.closest('.brand-tool');
+  if (button) setTool(button.dataset.tool);
+});
+
 el.backToSite.addEventListener('click', () => {
   el.results.hidden = true;
   el.backStrip.hidden = true;
@@ -787,6 +899,7 @@ el.input.addEventListener('keydown', (event) => { if (event.key === 'Enter') sub
 // ?url= prefills and auto-runs, which makes reports linkable; ?mode=site crawls.
 const params = new URLSearchParams(location.search);
 const preset = params.get('url');
+if (params.get('tool') === 'geo') setTool('geo');
 if (params.get('mode') === 'site') setMode('site');
 if (params.get('pages')) el.maxPages.value = params.get('pages');
 if (preset) {

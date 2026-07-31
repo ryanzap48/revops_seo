@@ -15,9 +15,13 @@
     <h1 class="brand">
       <span class="brand-word">RevOps</span>
       <span class="brand-rule"></span>
-      <span class="brand-sub">SEO</span>
+      <span class="brand-tools" id="tool-switch" role="tablist">
+        <button class="brand-tool is-active" data-tool="seo" role="tab">SEO</button>
+        <span class="brand-slash">/</span>
+        <button class="brand-tool" data-tool="geo" role="tab">GEO</button>
+      </span>
     </h1>
-    <div class="tagline">Page checker · on-page, technical &amp; content audit</div>
+    <div class="tagline" id="tagline">Page checker · on-page, technical &amp; content audit</div>
   </header>
 
   <section class="search-card">
@@ -63,7 +67,7 @@
             <span id="site-score-verdict"></span>
           </div>
         </div>
-        <div class="gauge-caption">Site score</div>
+        <div class="gauge-caption" id="site-score-caption">Site score</div>
         <div class="hero-counts">
           <span class="count-pill ok"><b id="site-count-strong">0</b> strong</span>
           <span class="count-pill warn"><b id="site-count-fair">0</b> fair</span>
@@ -122,7 +126,7 @@
             <span id="score-verdict"></span>
           </div>
         </div>
-        <div class="gauge-caption">On-page score</div>
+        <div class="gauge-caption" id="score-caption">On-page score</div>
         <div class="hero-counts">
           <span class="count-pill fail"><b id="count-errors">0</b> issues</span>
           <span class="count-pill warn"><b id="count-warnings">0</b> warnings</span>
@@ -152,6 +156,22 @@
 
     <!-- Report tab -->
     <div class="tab-panel is-active" data-panel="report">
+      <section class="panel" id="geo-panel" hidden>
+        <div class="panel-head">
+          <h2>AI crawler access</h2>
+          <span class="mono-note" id="geo-note"></span>
+        </div>
+        <div id="geo-body"></div>
+      </section>
+
+      <section class="panel" id="evidence-panel" hidden>
+        <div class="panel-head">
+          <h2>Evidence signals</h2>
+          <span class="mono-note">statistics, quotations and citations — the strongest measured levers</span>
+        </div>
+        <div id="evidence-body"></div>
+      </section>
+
       <section class="panel" id="vitals-panel" hidden>
         <div class="panel-head">
           <h2>Core Web Vitals</h2>
