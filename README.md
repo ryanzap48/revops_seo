@@ -75,6 +75,14 @@ same way, plus a spread of how many pages are strong / fair / weak.
 affected. One page needing 300 more words is a task; fourteen pages missing a
 canonical is a template bug, and the count is what tells them apart.
 
+Each task expands to the pages it applies to, so "15 pages need a meta
+description" can say which fifteen. Every URL is a link that re-runs the audit
+on that page. Where a page's own fix differs from the group wording — trimming a
+title by 12 characters rather than 40 — that page's version is shown beneath it.
+In the JSON each to-do carries `pages: [{ url, action? }]`, with `action`
+present only where it differs from the group's `action`. That costs roughly
+80 KB on a 100-page crawl.
+
 **Site issues** covers what only a crawl can find: duplicate titles, duplicate
 meta descriptions, duplicate H1s, duplicate body content, missing metadata,
 broken pages with the pages linking to them, pages reached only via redirect,

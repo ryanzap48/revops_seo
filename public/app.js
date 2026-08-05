@@ -661,21 +661,55 @@ function renderSiteTodos(d) {
     return;
   }
 
+  // finalUrl is what the audit should be re-run against — following the
+  // redirect the crawler already resolved, rather than making the user's click
+  // repeat it.
+  const byUrl = new Map(d.pages.map((p) => [p.url, p]));
+
   el.siteTodos.innerHTML = `
     <div class="panel">
       <div class="panel-head">
         <h2>Site to-do list</h2>
         <span class="mono-note">${d.todos.length} tasks across ${d.crawl.crawled} pages</span>
       </div>
-      ${d.todos.map((t) => `
-        <div class="todo-row">
-          <div class="todo-action">
-            <span class="site-todo-count">${t.pageCount} ${t.pageCount === 1 ? 'page' : 'pages'}</span>${esc(t.action)}
-            <span class="because"><span class="where">${esc(t.category)} › ${esc(t.check)}</span></span>
-          </div>
-          <div><span class="imp imp-${t.importance}">${esc(t.importanceLabel)}</span></div>
-        </div>`).join('')}
+      ${d.todos.map((t) => todoGroup(t, d, byUrl)).join('')}
     </div>`;
+
+  el.siteTodos.querySelectorAll('[data-page-url]').forEach((button) => {
+    button.addEventListener('click', () => runAudit(button.dataset.pageUrl, { keepSiteReport: true }));
+  });
+}
+
+/** One to-do, expandable to the pages it applies to. */
+function todoGroup(t, d, byUrl) {
+  const pages = t.pages || [];
+  const rows = pages.map((entry) => {
+    const page = byUrl.get(entry.url);
+    const target = page?.finalUrl || entry.url;
+    return `
+      <li>
+        <button class="page-link" data-page-url="${esc(target)}">${esc(shortUrl(entry.url, d.origin))}</button>
+        ${page?.title ? `<span class="todo-page-title">${esc(truncate(page.title, 70))}</span>` : ''}
+        ${entry.action ? `<span class="todo-page-action">${esc(entry.action)}</span>` : ''}
+      </li>`;
+  }).join('');
+
+  // Older crawls have no `pages`; render them as before rather than an empty list.
+  const body = pages.length
+    ? `<ul class="todo-pages">${rows}</ul>`
+    : `<p class="empty-state">This crawl predates per-page to-do detail. Re-run it to see which pages are affected.</p>`;
+
+  return `
+    <details class="todo-item">
+      <summary class="todo-row">
+        <div class="todo-action">
+          <span class="todo-caret">▶</span><span class="site-todo-count">${t.pageCount} ${t.pageCount === 1 ? 'page' : 'pages'}</span>${esc(t.action)}
+          <span class="because"><span class="where">${esc(t.category)} › ${esc(t.check)}</span></span>
+        </div>
+        <div><span class="imp imp-${t.importance}">${esc(t.importanceLabel)}</span></div>
+      </summary>
+      ${body}
+    </details>`;
 }
 
 function renderSiteIssues(d) {
